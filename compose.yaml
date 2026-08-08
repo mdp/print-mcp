@@ -1,0 +1,67 @@
+name: print-mcp
+
+services:
+  cups:
+    build:
+      context: .
+      target: cups
+    restart: unless-stopped
+    environment:
+      CUPS_ADMIN_USER: ${CUPS_ADMIN_USER:-printadmin}
+      CUPS_ADMIN_PASSWORD: ${CUPS_ADMIN_PASSWORD:?Set CUPS_ADMIN_PASSWORD in .env}
+      CUPS_ALLOWED_NETWORKS: ${CUPS_ALLOWED_NETWORKS:-100.64.0.0/10}
+    ports:
+      - "${CUPS_BIND_IP:-127.0.0.1}:${CUPS_PORT:-631}:631"
+    networks:
+      print-backend:
+        ipv4_address: 172.30.0.2
+    volumes:
+      - cups_config:/etc/cups
+      - cups_spool:/var/spool/cups
+      - cups_cache:/var/cache/cups
+
+  mcp:
+    build:
+      context: .
+      target: server
+    restart: unless-stopped
+    environment:
+      MCP_BEARER_TOKEN: ${MCP_BEARER_TOKEN:?Set MCP_BEARER_TOKEN in .env}
+      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-}
+      CUPS_SERVER: cups
+      CUPS_PORT: 631
+      DEFAULT_PRINTER: ${DEFAULT_PRINTER:-}
+      DEFAULT_PAGE_SIZE: ${DEFAULT_PAGE_SIZE:-letter}
+      DEFAULT_MARGIN_MM: ${DEFAULT_MARGIN_MM:-17.8}
+    ports:
+      - "127.0.0.1:${MCP_PORT:-8000}:8000"
+    depends_on:
+      cups:
+        condition: service_healthy
+    networks:
+      - print-backend
+      - tunnel-edge
+
+  cloudflared:
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:2026.6.1}
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-token-not-configured}
+    depends_on:
+      mcp:
+        condition: service_healthy
+    networks:
+      - tunnel-edge
+
+networks:
+  print-backend:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  tunnel-edge: {}
+
+volumes:
+  cups_config: {}
+  cups_spool: {}
+  cups_cache: {}
