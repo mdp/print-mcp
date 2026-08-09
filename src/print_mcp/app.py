@@ -44,6 +44,9 @@ class SecurityMiddleware:
         if not self._authenticated(scope, headers):
             await self._reject(send, 401, "missing or invalid bearer token", authenticate=True)
             return
+        path_token = self._path_token(scope)
+        if path_token is not None:
+            scope = {**scope, "path": "/mcp", "raw_path": b"/mcp"}
         await self.app(scope, receive, send)
 
     def _authenticated(self, scope: Scope, headers: dict[bytes, bytes]) -> bool:
@@ -54,6 +57,9 @@ class SecurityMiddleware:
 
     def _supplied_tokens(self, scope: Scope, headers: dict[bytes, bytes]) -> list[bytes]:
         tokens: list[bytes] = []
+        path_token = self._path_token(scope)
+        if path_token is not None:
+            tokens.append(path_token)
         for header_name in _TOKEN_CANDIDATES:
             value = headers.get(header_name)
             if not value:
@@ -69,6 +75,16 @@ class SecurityMiddleware:
             if key.lower() in {"access_token", "api_key", "mcp_token", "token"}:
                 tokens.extend(value.encode("latin-1") for value in values)
         return tokens
+
+    @staticmethod
+    def _path_token(scope: Scope) -> bytes | None:
+        path = scope.get("path", "")
+        if not path.startswith("/mcp/"):
+            return None
+        token = path[len("/mcp/") :]
+        if not token or "/" in token:
+            return None
+        return token.encode("utf-8")
 
     @staticmethod
     async def _reject(send: Send, status: int, detail: str, authenticate: bool = False) -> None:

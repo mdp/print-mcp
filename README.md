@@ -1,245 +1,273 @@
 # print-mcp
 
-A Dockerized MCP server that turns Markdown into print-ready PDFs and submits them to printers managed by CUPS. The MCP endpoint uses a static Bearer token and is published to the internet through a Cloudflare Tunnel.
+**Now your agent can print.**
 
-This guide walks the whole stack from a clean machine: CUPS (printer server), the MCP server (renders + submits jobs), and Cloudflare (public HTTPS endpoint). Follow it top to bottom the first time — a surprising amount of the pain in this project comes from skipping one step, and the biggest single gotcha is the **MCP host allow-list** (step 6).
+`print-mcp` is a local MCP server that turns Markdown into a print-ready PDF and sends it to a printer on your local network. Run it next to the printer, optionally open it to the internet with a Cloudflare Tunnel, and connect any MCP-compatible agent to it.
 
-## Architecture
+Your agent can then:
+
+- Discover the printers configured on your machine.
+- Print Markdown with page size, margins, orientation, copies, duplex, and color options.
+- Check the status of a submitted print job.
+
+The important part: **the printer stays local and is never exposed to the internet.** Cloudflare only provides the secure public connection to your local MCP endpoint; the MCP server renders and submits the job on your machine.
+
+## How It Works
 
 ```text
-Remote MCP client -> Cloudflare Tunnel -> print-mcp -> CUPS -> USB or IPP printer
-                                                    ^
-Tailscale clients -> host Tailscale IP:631 ----------+
+                          Cloudflare Tunnel
+                         (outbound connection)
+                                |
+Any MCP client  ------------>  MCP server  ------------>  CUPS  ------------>  Local printer
+                                |                         |
+                         Markdown -> PDF            USB or IPP
 ```
 
-- `cups` listens on `0.0.0.0:631` *inside* the private compose network. On the host it is published only on `CUPS_BIND_IP:631`.
-- `mcp` exposes the MCP HTTP endpoint on port 8000, reachable by `cloudflared` over the private `tunnel-edge` network but by the host only on localhost.
-- `cloudflared` runs only when the `tunnel` profile is enabled; it dials out to Cloudflare and needs no inbound ports open.
+The Docker Compose stack runs three services:
 
-## Requirements
+- `mcp` is the MCP server. It renders Markdown and exposes the tools.
+- `cups` manages the local printer queue and submits print jobs.
+- `cloudflared` is optional. It publishes `mcp` through a Cloudflare named tunnel without opening an inbound port.
 
-- A Linux Docker host with a recent Docker Engine + Docker Compose plugin. **Docker Desktop is not supported** (no USB passthrough; host mounts differ).
-- For remote CUPS access: Tailscale (or another trusted private interface) on that host.
-- For the public MCP URL: a Cloudflare account, a domain on it, and a **named** tunnel (Zero Trust feature).
+## What You Need
 
-## Step 1 — Clone and configure
+- A Linux machine on the same network as the printer.
+- Docker Engine and the Docker Compose plugin.
+- A network printer that supports IPP Everywhere, or a USB printer.
+- For remote agents: a Cloudflare account, a domain on Cloudflare, and a named tunnel.
+
+Docker Desktop is not supported. USB passthrough and host networking differ from the Linux setup this project expects.
+
+## Quick Start
+
+### 1. Configure the server
 
 ```bash
-git clone <your-repo-url> print-mcp && cd print-mcp
+git clone <your-repo-url> print-mcp
+cd print-mcp
 cp .env.example .env
 ```
 
-Generate two independent secrets and paste them into `.env`:
+Generate secrets and put them in `.env`:
 
 ```bash
-openssl rand -hex 32    # -> MCP_BEARER_TOKEN
-openssl rand -hex 24    # -> CUPS_ADMIN_PASSWORD
+openssl rand -hex 32  # MCP_BEARER_TOKEN
+openssl rand -hex 24  # CUPS_ADMIN_PASSWORD
 ```
 
-`.env` is not committed and holds everything the stack needs. The keys are described in `.env.example`; the two that most often trip people up are `CUPS_ALLOWED_NETWORKS` and `MCP_ALLOWED_HOSTS`, covered below.
+At minimum, set these values:
 
-## Step 2 — Start the base stack
+```dotenv
+MCP_BEARER_TOKEN=your-long-random-token
+CUPS_ADMIN_PASSWORD=your-long-random-password
+```
+
+### 2. Add the local printer
+
+For a modern network printer, add its IP address to `.env`:
+
+```dotenv
+CUPS_PRINTER_IP=192.168.1.50
+CUPS_PRINTER_NAME=office-printer
+```
+
+When the stack starts, CUPS creates an IPP Everywhere queue at `ipp://192.168.1.50/ipp/print`, enables it, and makes it the default printer.
+
+If you do not want automatic setup, leave `CUPS_PRINTER_IP` empty and add a queue manually:
+
+```bash
+docker compose exec cups lpadmin \
+  -p office-printer \
+  -E \
+  -v ipp://192.168.1.50/ipp/print \
+  -m everywhere
+docker compose exec cups lpadmin -d office-printer
+```
+
+For a USB printer, use the USB Compose overlay instead:
+
+```bash
+docker compose -f compose.yaml -f compose.usb.yaml up -d --build
+```
+
+### 3. Start and test locally
 
 ```bash
 docker compose up -d --build
+curl -fsS http://127.0.0.1:8000/healthz
 ```
 
-This starts `cups` and `mcp`. CUPS is reachable at <http://127.0.0.1:631> (admin page at `/admin`) and MCP at <http://127.0.0.1:8000>. Don't start the tunnel yet.
+The local endpoints are:
 
-Verify the services are healthy:
+- MCP: `http://127.0.0.1:8000/mcp`
+- CUPS admin: `http://127.0.0.1:631/admin`
+
+Send a local test print:
 
 ```bash
-curl -fsS http://127.0.0.1:8000/healthz   # {"status":"ok"}
-docker compose ps
+echo 'Hello from print-mcp.' | docker compose exec -T mcp \
+  python /app/cli/print_file.py -
 ```
 
-## Step 3 — Add your printer
+At this point the agent-facing server is running locally and can print to your local printer. You can stop here if your MCP client runs on the same machine.
 
-Most modern network printers speak **IPP Everywhere / driverless**, so this is the recommended path.
+## Connect A Remote Agent
 
-**Automatic (recommended).** Put the printer's static IP in `.env` and the `cups` container configures the queue itself on every start — no manual `lpadmin`, and it reapplies automatically after any rebuild or volume wipe:
+To let an MCP client connect from anywhere, put the local MCP endpoint behind a Cloudflare Tunnel.
+
+### 1. Create the Cloudflare route
+
+In Cloudflare Zero Trust:
+
+1. Create a named tunnel.
+2. Add a public hostname, for example `print.example.com`.
+3. Set its service URL to exactly `http://mcp:8000`.
+4. Copy the tunnel token into `.env`.
+
+Then add the same public hostname to the MCP host allow-list:
 
 ```dotenv
-# .env
-CUPS_PRINTER_IP=192.168.86.32
-CUPS_PRINTER_NAME=brother-hl2350dw
-```
-
-On boot it creates the `ipp://CUPS_PRINTER_IP/ipp/print` queue (if it doesn't already exist), enables it, and makes it the CUPS default. Set it and let Docker do the rest.
-
-**Manual fallback.** Point the queue at the printer's IPP URI and enable it in one shot:
-
-```bash
-# adjust the IP and URI to your printer
-docker compose exec cups lpadmin -p brother -E -v ipp://192.168.86.32/ipp/print -m everywhere
-docker compose exec cups lpadmin -d brother        # make it the default queue
-```
-
-`-m everywhere` asks CUPS to use its built-in driverless/IPP Everywhere model, which auto-detects media, duplex, and color capabilities. Find the IPP URI on the printer's network report or config page; it is usually `ipp://PRINTER_IP:631/ipp/print`.
-
-Prefer a web UI? Open <http://127.0.0.1:631/admin>, sign in with `CUPS_ADMIN_USER` / `CUPS_ADMIN_PASSWORD` (paperclip / admin section), choose *Internet Printing Protocol*, and enter the `ipp://` URI.
-
-USB printers need the USB overlay: `docker compose down`, then `docker compose -f compose.yaml -f compose.usb.yaml up -d --build`, which exposes only the Linux USB bus to CUPS. Replugging a device may require restarting the CUPS service.
-
-If calls should not have to name a printer, set `DEFAULT_PRINTER` in `.env` to the queue name. Queue config and job history persist in named Docker volumes.
-
-## Step 4 — Quick test
-
-The print CLI is baked into the `mcp` image, so a smoke test needs no mounts:
-
-```bash
-echo 'This is a quick test of the Print MCP stack.' | docker compose exec -T mcp \
-  python /app/cli/print_file.py - --page-size a4
-```
-
-Expected: `rendered /tmp/stdin.pdf (1 pages)` then `submitted job N to printer '...'`. See the [CLI](#cli) section for all options.
-
-## Step 5 — (Optional) Remote CUPS over Tailscale
-
-To manage printers from another machine, publish CUPS only on this host's Tailscale IP:
-
-```bash
-tailscale ip -4
-```
-
-```dotenv
-# .env
-CUPS_BIND_IP=100.100.20.30
-CUPS_ALLOWED_NETWORKS=100.64.0.0/10
-```
-
-Then `docker compose up -d`. Other tailnet machines can browse <http://100.100.20.30:631> and add a queue using `ipp://100.100.20.30:631/printers/QUEUE_NAME`.
-
-`CUPS_ALLOWED_NETWORKS` is a comma-separated list of IPs/CIDRs allowed to browse and print. Keep `CUPS_BIND_IP` on localhost or a private interface; **never** use `0.0.0.0` unless a host firewall independently limits port 631. Administration and job cancellation always require the admin credentials; printing/queries do not.
-
-## Step 6 — Publish MCP through Cloudflare Tunnel
-
-This is where the biggest mistake in this project lives: **if you don't add your public hostname to `MCP_ALLOWED_HOSTS`, the tunnel forwards traffic fine but the MCP server rejects every request with HTTP 421 `Invalid Host header`.** The tunnel looks healthy while nothing works.
-
-### In Cloudflare Zero Trust
-
-1. Create a **named tunnel** (Zero Trust → Networks → Tunnels → Create a tunnel). Choose the Cloudflare connector type.
-2. Create a **public hostname** for `TUNNELED_HOSTNAME.example` whose service URL is exactly:
-
-   ```text
-   http://mcp:8000
-   ```
-
-   The hostname is resolved from inside the compose network, so `mcp` works even though port 8000 is otherwise bound to localhost. Note: if `MCP_ALLOWED_HOSTS` is not set, this same hostname is what the server checks — keep the two in sync exactly (protocol and port are ignored, hostname is not).
-3. Copy the connector token (the long `eyJ...` string) into `.env`.
-
-```dotenv
-# .env
 CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoi...
-MCP_ALLOWED_HOSTS=TUNNELED_HOSTNAME.example
+MCP_ALLOWED_HOSTS=print.example.com
 ```
 
-`MCP_ALLOWED_HOSTS` accepts a comma-separated list. Only hostnames already in the list pass the server's DNS-rebinding protection; localhost and `mcp` are allowed by default for local testing.
+The hostname must match exactly. If it does not, the tunnel can be healthy while the MCP server rejects requests with HTTP 421 `Invalid Host header`.
 
-### Start the tunnel profile
+### 2. Start the tunnel
 
 ```bash
 docker compose --profile tunnel up -d --build
 ```
 
-The public endpoint is `https://TUNNELED_HOSTNAME.example/mcp`.
-
-### Quick remote check
-
-From outside (or with curl on the host):
-
-```bash
-curl -fsS https://TUNNELED_HOSTNAME.example/healthz
-```
-
-Not a 2xx? Start with `docker compose logs cloudflared` to confirm the connector is up and forwarding the URL, then re-check that `MCP_ALLOWED_HOSTS` exactly matches the hostname in the URL you're hitting.
-
-## MCP URL and auth
-
-Endpoint: `https://TUNNELED_HOSTNAME.example/mcp` (or `http://127.0.0.1:8000/mcp` locally).
-
-Every `/mcp` request must send your `MCP_BEARER_TOKEN` in any one of these forms, checked in order:
-
-1. `Authorization: Bearer <token>` (the standard form — preferred)
-2. `Authorization: <token>` (raw token, no scheme)
-3. `X-API-Key: <token>`
-4. `X-Auth-Token: <token>`
-5. `X-MCP-Token: <token>`
-6. A query parameter `token`, `access_token`, `api_key`, or `mcp_token`
+Your MCP endpoint is now:
 
 ```text
+https://print.example.com/mcp
+```
+
+The tunnel makes an outbound connection from your machine to Cloudflare. You do not need to expose port 8000 or open an inbound firewall port.
+
+### 3. Add it to your MCP client
+
+Configure your MCP-compatible agent or client with the public URL and the same bearer token from `.env`:
+
+```text
+URL:   https://print.example.com/mcp
+Token: MCP_BEARER_TOKEN
+```
+
+The standard authentication header is:
+
+```http
 Authorization: Bearer YOUR_MCP_BEARER_TOKEN
 ```
 
-```bash
-curl -fsS -H "Authorization: Bearer $MCP_BEARER_TOKEN" \
-  https://TUNNELED_HOSTNAME.example/mcp -X POST -d '{}'
+For older MCP agents that cannot set an authorization header, use the same token as
+the final path segment instead:
+
+```text
+https://print.example.com/mcp/YOUR_MCP_BEARER_TOKEN
 ```
 
-The alternate transports exist for proxies / TLS terminators (some Cloudflare or forward-proxy setups) that rewrite or strip `Authorization`. Use whichever survives the path from client to container; the bearer header is the most secure. If you ever set `MCP_ALLOWED_ORIGINS`, the `Origin` header is validated too.
+The server treats this URL as an authenticated alias of `/mcp`. Path tokens can be
+recorded in proxy, tunnel, browser, or server logs, so prefer the header form when
+the client supports it.
 
-The CLI honors the same token. `MCP_BEARER_TOKEN` (server auth) and `CLOUDFLARE_TUNNEL_TOKEN` (tunnel identity) are separate secrets; rotate either in `.env` and recreate only the affected service.
+The exact configuration shape depends on the MCP client. Look for its remote HTTP, Streamable HTTP, or custom MCP server settings.
 
-## CLI
+Now your agent can print.
 
-The simplest way to print from the host is to run the CLI inside the running `mcp` container — `docker exec` bypasses the server entrypoint and inherits CUPS, the default queue, and secrets:
+## MCP Tools
+
+The server exposes three tools:
+
+### `list_printers`
+
+Lists configured printers and their current capabilities.
+
+### `print_markdown`
+
+Renders Markdown to PDF and submits it to CUPS. It supports:
+
+- `title`
+- `printer`
+- `page_size`: `letter`, `legal`, or `a4`
+- `orientation`: `portrait` or `landscape`
+- `margins`
+- `copies`: 1 through 10
+- `sides`: one-sided, two-sided long-edge, or two-sided short-edge
+- `color_mode`: auto, color, or monochrome
+
+The default is letter paper, portrait orientation, and two-sided long-edge printing.
+
+### `get_job_status`
+
+Returns the current state and timestamps for a CUPS print job.
+
+Raw HTML is disabled. Markdown images may use public HTTP/HTTPS URLs or data URIs. Private, loopback, link-local, multicast, and reserved destinations are blocked, including after redirects.
+
+## Local CLI
+
+The same image includes a CLI for printing without an MCP client:
 
 ```bash
-# Markdown from a pipe (no file inside the container required)
 cat notes.md | docker compose exec -T mcp python /app/cli/print_file.py -
 
-# Options
 docker compose exec -T mcp python /app/cli/print_file.py notes.md \
-  --page-size a4 --orientation portrait \
-  --margins-mm 12 --copies 2 \
-  --sides two-sided-long-edge --color mono
+  --page-size a4 \
+  --orientation portrait \
+  --margins-mm 12 \
+  --copies 2 \
+  --sides two-sided-long-edge \
+  --color mono
 ```
 
-`file` is a path inside the container or `-` for stdin. A path writes the rendered PDF next to the source; stdin writes to the container temp dir. Flags:
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--printer` | settings/default | CUPS queue name |
-| `--title` | file name or `stdin` | job title |
-| `--page-size` | `letter` | `letter`, `legal`, `a4` |
-| `--orientation` | `portrait` | `portrait`, `landscape` |
-| `--margins-mm` | `DEFAULT_MARGIN_MM` | uniform margins in mm |
-| `--copies` | `1` | number of copies |
-| `--sides` | `one-sided` | `one-sided`, `two-sided-long-edge`, `two-sided-short-edge` |
-| `--color` | `auto` | `auto`, `color`, `mono`/`monochrome` |
-
-There is also `bin/print-md.sh`, a thin wrapper that mounts the source directory so you can pass any absolute path:
+There is also a host-friendly wrapper for files outside the container:
 
 ```bash
 ./bin/print-md.sh --page-size a4 ./docs/report.md
 ```
 
-## MCP tools
+## Configuration
 
-- `list_printers()` returns every configured CUPS queue and its current capabilities.
-- `print_markdown(markdown, title?, printer?, page_size?, orientation?, margins?, copies?, sides?, color_mode?)` renders and submits a document. Standard paper sizes are `letter`, `legal`, and `a4`.
-- `get_job_status(job_id)` returns the state and timestamps retained by CUPS.
+Copy `.env.example` to `.env` for the complete list. The settings most people need are:
 
-Raw HTML is disabled. Markdown images may use public HTTP/HTTPS URLs or data URIs. Private, loopback, link-local, multicast, and reserved destinations are rejected, including after redirects. External images are downloaded and validated before PDF rendering; a failed image prevents submission.
+| Variable | Purpose |
+| --- | --- |
+| `MCP_BEARER_TOKEN` | Token required by MCP clients |
+| `CUPS_ADMIN_PASSWORD` | Password for CUPS administration |
+| `CUPS_PRINTER_IP` | IP address for automatic IPP queue setup |
+| `CUPS_PRINTER_NAME` | Name of the automatic CUPS queue |
+| `DEFAULT_PRINTER` | Queue used when a tool call omits `printer` |
+| `CLOUDFLARE_TUNNEL_TOKEN` | Required for the `tunnel` Compose profile |
+| `MCP_ALLOWED_HOSTS` | Public hostname accepted by the MCP server |
 
-## Health and troubleshooting
+The MCP server and CUPS are bound to localhost by default. Keep them that way when using Cloudflare Tunnel. The tunnel container reaches MCP over the private Compose network.
+
+## Troubleshooting
+
+Check service state and logs:
+
+```bash
+docker compose ps
+docker compose logs cups mcp cloudflared
+```
+
+Check the two health endpoints:
 
 ```bash
 curl http://127.0.0.1:8000/healthz
 curl http://127.0.0.1:8000/readyz
-docker compose logs cups mcp cloudflared
 ```
 
-`/healthz` checks the MCP process. `/readyz` returns 503 until CUPS has at least one configured queue. Neither exposes document or credential data.
+`/healthz` confirms that the MCP process is running. `/readyz` is healthy only after CUPS has at least one configured printer.
 
-| Symptom | Fix |
-| --- | --- |
-| HTTP 421 `Invalid Host header` via the tunnel, but works on localhost | `MCP_ALLOWED_HOSTS` in `.env` does not (exactly) contain the public hostname you're hitting. Update it and `docker compose up -d mcp`. |
-| Tunnel up but no requests traced | Confirm the tunnel is actually running (`docker compose --profile tunnel ps`) and the public hostname maps to `http://mcp:8000`; check route precedence in Cloudflare so a Worker doesn't shadow the tunnel. |
-| `cupsdDoSelect() failed - Bad address!`, cups keeps crashing | Docker ≥27.3 sets an enormous `nofile` ulimit that overflows CUPS's `select()`. The entrypoint already applies `ulimit -n 65535`; if you see this, confirm you rebuilt (`--build`) and aren't bypassing `entrypoint.sh`. |
-| CUPS can't discover a network printer | Add it by explicit IPP URI; multicast discovery does not reliably cross Docker or Tailscale networks. Reserve the printer's LAN address in DHCP. |
-| `ipps://` printer with a private certificate | Install its CA in the CUPS image instead of disabling TLS validation. |
-| Unsupported duplex/color/media option | MCP returns `UNSUPPORTED_OPTION` without submitting the job. |
+Common issues:
+
+- **HTTP 421 through Cloudflare:** add the exact public hostname to `MCP_ALLOWED_HOSTS`, then recreate the `mcp` service with `docker compose up -d mcp`.
+- **Tunnel is running but the endpoint does not respond:** verify the Cloudflare public hostname points to `http://mcp:8000` and inspect `docker compose logs cloudflared`.
+- **Printer is not found:** use the printer's explicit IPP URI. Discovery does not reliably cross Docker or Tailscale networks.
+- **CUPS keeps crashing with `cupsdDoSelect() failed - Bad address!`:** rebuild the image so the CUPS entrypoint applies the file-descriptor limit workaround.
 
 ## Development
 

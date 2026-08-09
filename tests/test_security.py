@@ -6,7 +6,7 @@ from print_mcp.app import SecurityMiddleware
 
 
 async def downstream(scope, receive, send) -> None:
-    response = JSONResponse({"passed": True})
+    response = JSONResponse({"passed": True, "path": scope["path"]})
     await response(scope, receive, send)
 
 
@@ -37,6 +37,26 @@ async def test_mcp_accepts_correct_token() -> None:
     ) as client:
         response = await client.post("/mcp", headers={"Authorization": f"Bearer {'a' * 32}"})
     assert response.status_code == 200
+
+
+async def test_mcp_accepts_token_in_path_and_normalizes_mcp_route() -> None:
+    app = SecurityMiddleware(downstream, "a" * 32, frozenset())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(f"/mcp/{'a' * 32}")
+    assert response.status_code == 200
+    assert response.json()["path"] == "/mcp"
+
+
+@pytest.mark.parametrize("path", ["/mcp", "/mcp/", f"/mcp/{'b' * 32}", f"/mcp/{'a' * 32}/extra"])
+async def test_mcp_rejects_missing_or_invalid_path_token(path: str) -> None:
+    app = SecurityMiddleware(downstream, "a" * 32, frozenset())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(path)
+    assert response.status_code == 401
 
 
 async def test_mcp_accepts_bearer_token_any_case() -> None:
