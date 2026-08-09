@@ -1,16 +1,16 @@
 # print-mcp
 
-**Now your agent can print.**
+> "We absolutely need to bring ink and paper into this."
 
-`print-mcp` is a local MCP server that turns Markdown into a print-ready PDF and sends it to a printer on your local network. Run it next to the printer, optionally open it to the internet with a Cloudflare Tunnel, and connect any MCP-compatible agent to it.
+`print-mcp` is a home-network print service that turns Markdown into a print-ready PDF and sends it to your network printer. Run it on any Linux machine on the same home network as the printer, optionally open it to the internet with a Cloudflare Tunnel, and give the MCP endpoint to all of your agents.
 
 Your agent can then:
 
-- Discover the printers configured on your machine.
+- Use the network printer configured for your home.
 - Print Markdown with page size, margins, orientation, copies, duplex, and color options.
 - Check the status of a submitted print job.
 
-The important part: **the printer stays local and is never exposed to the internet.** Cloudflare only provides the secure public connection to your local MCP endpoint; the MCP server renders and submits the job on your machine.
+The important part: **the printer stays on your home network and is never exposed to the internet.** Cloudflare only provides the secure public connection to the MCP endpoint; the server renders and submits the job through the network printer.
 
 ## How It Works
 
@@ -31,7 +31,7 @@ The Docker Compose stack runs three services:
 
 ## What You Need
 
-- A Linux machine on the same network as the printer.
+- A Linux machine that can reach your home network printer.
 - Docker Engine and the Docker Compose plugin.
 - A network printer that supports IPP Everywhere, or a USB printer.
 - For remote agents: a Cloudflare account, a domain on Cloudflare, and a named tunnel.
@@ -62,7 +62,7 @@ MCP_BEARER_TOKEN=your-long-random-token
 CUPS_ADMIN_PASSWORD=your-long-random-password
 ```
 
-### 2. Add the local printer
+### 2. Configure your network printer
 
 For a modern network printer, add its IP address to `.env`:
 
@@ -109,7 +109,7 @@ echo 'Hello from print-mcp.' | docker compose exec -T mcp \
   python /app/cli/print_file.py -
 ```
 
-At this point the agent-facing server is running locally and can print to your local printer. You can stop here if your MCP client runs on the same machine.
+At this point, `print-mcp` is running on your home network and can print to the configured network printer. Any MCP client on the same network can use the local endpoint; agents outside your network can use the Cloudflare URL from the next section.
 
 ## Connect A Remote Agent
 
