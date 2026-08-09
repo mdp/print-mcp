@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import hmac
 import json
+from urllib.parse import parse_qs
 
 import uvicorn
 from starlette.applications import Starlette
@@ -14,6 +15,13 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .config import Settings, get_settings
 from .printer import CupsPrinter
 from .server import create_mcp
+
+_TOKEN_CANDIDATES = (
+    b"authorization",
+    b"x-api-key",
+    b"x-auth-token",
+    b"x-mcp-token",
+)
 
 
 class SecurityMiddleware:
@@ -33,17 +41,34 @@ class SecurityMiddleware:
             if normalized not in self.allowed_origins:
                 await self._reject(send, 403, "origin is not allowed")
                 return
-        authorization = headers.get(b"authorization", b"")
-        scheme, separator, supplied = authorization.partition(b" ")
-        valid = (
-            separator == b" "
-            and scheme.lower() == b"bearer"
-            and hmac.compare_digest(supplied, self.token)
-        )
-        if not valid:
+        if not self._authenticated(scope, headers):
             await self._reject(send, 401, "missing or invalid bearer token", authenticate=True)
             return
         await self.app(scope, receive, send)
+
+    def _authenticated(self, scope: Scope, headers: dict[bytes, bytes]) -> bool:
+        for candidate in self._supplied_tokens(scope, headers):
+            if hmac.compare_digest(candidate, self.token):
+                return True
+        return False
+
+    def _supplied_tokens(self, scope: Scope, headers: dict[bytes, bytes]) -> list[bytes]:
+        tokens: list[bytes] = []
+        for header_name in _TOKEN_CANDIDATES:
+            value = headers.get(header_name)
+            if not value:
+                continue
+            scheme, separator, supplied = value.partition(b" ")
+            if header_name == b"authorization" and separator == b" ":
+                if scheme.lower() == b"bearer":
+                    tokens.append(supplied)
+                continue
+            tokens.append(value if separator != b" " else supplied)
+        query = scope.get("query_string", b"").decode("latin-1")
+        for key, values in parse_qs(query, keep_blank_values=True).items():
+            if key.lower() in {"access_token", "api_key", "mcp_token", "token"}:
+                tokens.extend(value.encode("latin-1") for value in values)
+        return tokens
 
     @staticmethod
     async def _reject(send: Send, status: int, detail: str, authenticate: bool = False) -> None:

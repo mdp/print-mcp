@@ -6,7 +6,7 @@ Talks to the dockerized CUPS service over the compose network.
 
 Examples:
     print_file.py notes.md
-    print_file.py notes.md --printer brother-hl2350dw --page-size a4 --copies 2 --sides one-sided
+    print_file.py notes.md --printer brother-hl2350dw --page-size a4 --copies 2
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--margins-mm", type=float, help="uniform page margins in mm")
     parser.add_argument("--copies", type=int, default=1)
     sides_choices = ["one-sided", "two-sided-long-edge", "two-sided-short-edge"]
-    parser.add_argument("--sides", default="one-sided", choices=sides_choices)
+    parser.add_argument("--sides", default="two-sided-long-edge", choices=sides_choices)
     parser.add_argument("--color", default="auto", choices=sorted(COLOR_ALIASES))
     return parser.parse_args()
 

@@ -149,4 +149,29 @@ EOF
 
 mkdir -p /run/cups /var/spool/cups /var/cache/cups
 rm -f /run/cups/cupsd.pid
-exec cupsd -f
+ulimit -n 65535
+
+cupsd -f &
+cups_pid=$!
+trap 'kill "$cups_pid"' TERM INT
+
+attempt=0
+while ! lpstat -r >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -ge 30 ] && break
+  sleep 1
+done
+
+printer_ip="${CUPS_PRINTER_IP:-}"
+printer_name="${CUPS_PRINTER_NAME:-printer}"
+if [ -n "$printer_ip" ]; then
+  if ! lpstat -p "$printer_name" >/dev/null 2>&1; then
+    echo "adding IPP queue ${printer_name}: ipp://${printer_ip}/ipp/print"
+    lpadmin -p "$printer_name" -E -v "ipp://${printer_ip}/ipp/print" -m everywhere
+  fi
+  lpadmin -d "$printer_name"
+  lpoptions -p "$printer_name" -o sides=two-sided-long-edge >/dev/null
+fi
+
+wait "$cups_pid"
+exit $?

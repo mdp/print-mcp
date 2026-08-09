@@ -59,7 +59,7 @@ def create_mcp(settings: Settings, printer: CupsPrinter | None = None) -> FastMC
         orientation: Orientation = Orientation.PORTRAIT,
         margins: PageMargins | None = None,
         copies: int = 1,
-        sides: Sides = Sides.ONE_SIDED,
+        sides: Sides = Sides.LONG_EDGE,
         color_mode: ColorMode = ColorMode.AUTO,
     ) -> PrintResult:
         """Render Markdown as a polished PDF and submit it to the configured printer."""
